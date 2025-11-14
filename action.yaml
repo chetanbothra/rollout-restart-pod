@@ -1,0 +1,86 @@
+name: "K8s Universal Rollout Restart"
+run-name: "Restart ${{ inputs.app_name }} in ${{ inputs.namespace }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      namespace:
+        description: "Kubernetes namespace"
+        required: true
+      app_name:
+        description: "Kubernetes resource name"
+        required: true
+      slack_webhook:
+        description: "Slack Webhook URL (optional)"
+        required: false
+
+jobs:
+  restart-app:
+    runs-on: ubuntu-latest
+
+    steps:
+      # --------------------------
+      # 1. Configure AWS + Kube
+      # --------------------------
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --region ${{ secrets.AWS_REGION }} --name ${{ secrets.EKS_CLUSTER }}
+
+      # -------------------------------------
+      # 2. Detect resource type (D/SS/DS)
+      # -------------------------------------
+      - name: Detect Kubernetes Resource Type
+        id: detect
+        run: |
+          echo "Detecting resource type..."
+
+          if kubectl get deployment ${{ inputs.app_name }} -n ${{ inputs.namespace }} >/dev/null 2>&1; then
+            TYPE="deployment"
+          elif kubectl get statefulset ${{ inputs.app_name }} -n ${{ inputs.namespace }} >/dev/null 2>&1; then
+            TYPE="statefulset"
+          elif kubectl get daemonset ${{ inputs.app_name }} -n ${{ inputs.namespace }} >/dev/null 2>&1; then
+            TYPE="daemonset"
+          else
+            echo "ERROR: Resource not found"
+            exit 1
+          fi
+
+          echo "type=$TYPE" >> $GITHUB_OUTPUT
+          echo "Detected Type: $TYPE"
+
+      # -------------------------------------
+      # 3. Perform Rollout Restart
+      # -------------------------------------
+      - name: Rollout Restart
+        run: |
+          echo "Restarting ${{ inputs.app_name }} (${ { steps.detect.outputs.type }} )"
+
+          kubectl rollout restart ${{ steps.detect.outputs.type }}/$(echo ${{ inputs.app_name }}) -n ${{ inputs.namespace }}
+
+      # -------------------------------------------------------------
+      # 4. Wait for Rollout to Complete + Detect Success/Failure
+      # -------------------------------------------------------------
+      - name: Wait For Rollout
+        id: wait
+        run: |
+          echo "Waiting for rollout..."
+
+          set +e
+          OUTPUT=$(kubectl rollout status ${{ steps.detect.outputs.type }}/${{ inputs.app_name }} -n ${{ inputs.namespace }} --timeout=300s)
+          STATUS=$?
+          set -e
+
+          echo "$OUTPUT"
+          echo "rollout_msg=$OUTPUT" >> $GITHUB_OUTPUT
+          echo "rollout_status=$STATUS" >> $GITHUB_OUTPUT
+
+          if [ "$STATUS" -ne 0 ]; then
+            echo "Rollout failed."
+            exit 1
+          fi
