@@ -10,10 +10,6 @@ on:
       app_name:
         description: "Kubernetes resource name"
         required: true
-      slack_webhook:
-        description: "Slack Webhook URL (optional)"
-        required: false
-
 jobs:
   restart-app:
     runs-on: ubuntu-latest
